@@ -641,6 +641,7 @@ fn main() {
     buffa_build::Config::new()
         .files(&["protos/wkt_usage.proto"])
         .includes(&["protos/"])
+        .type_attribute(".test.wkt.TimestampKey", "#[derive(Eq, Hash)]")
         .compile()
         .expect("buffa_build failed for wkt_usage.proto");
 
