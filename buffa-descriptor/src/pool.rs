@@ -332,6 +332,16 @@ pub enum PoolError {
         field: String,
         index: i32,
     },
+    /// A map's enum value type starts with a nonzero value. Only a closed
+    /// enum reaches this rule: an open enum with a nonzero first value fails
+    /// earlier with
+    /// [`OpenEnumFirstValueNotZero`](Self::OpenEnumFirstValueNotZero),
+    /// whether or not a map names it.
+    MapEnumFirstValueNotZero {
+        field: String,
+        enum_name: String,
+        number: i32,
+    },
     /// A oneof member has required or repeated cardinality instead of optional.
     InvalidOneofCardinality { field: String },
     /// A repeated field declares an explicit default value.
@@ -696,6 +706,10 @@ impl core::fmt::Display for PoolError {
             } => write!(
                 f,
                 "field {field} in message {message} has invalid oneof index {index}"
+            ),
+            Self::MapEnumFirstValueNotZero { field, enum_name, number } => write!(
+                f,
+                "map field {field} uses enum {enum_name} whose first value is {number}, which must be zero"
             ),
             Self::InvalidOneofCardinality { field } => {
                 write!(f, "field {field} is a oneof member but is not optional")
@@ -1455,6 +1469,7 @@ impl DescriptorPool {
             }
         }
         self.finalize_field_enum_types(first_new_message, first_new_extension);
+        self.check_linked_enum_fields(first_new_message)?;
 
         // Record the symbol → file index (for `FindFileContainingSymbol`).
         for (i, f) in new_files.iter().enumerate() {
@@ -2892,6 +2907,46 @@ impl DescriptorPool {
         for extension in &mut self.extensions[first_new_extension..] {
             resolve(&mut extension.field);
         }
+    }
+
+    /// Checks the rules that relate a message field to the enum it names.
+    ///
+    /// The walk runs once every enum in the set is linked, because a field's
+    /// enum may be declared later in its file or in a later file of the set.
+    /// It visits the new messages in link order and each message's fields in
+    /// declaration order, and returns the first violation.
+    fn check_linked_enum_fields(&self, first_new_message: usize) -> Result<(), PoolError> {
+        for message in &self.messages[first_new_message..] {
+            for field in &message.fields {
+                self.check_map_enum_first_value(message, field)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A map's enum value type must declare zero as its first value, in
+    /// every syntax.
+    fn check_map_enum_first_value(
+        &self,
+        message: &MessageDescriptor,
+        field: &FieldDescriptor,
+    ) -> Result<(), PoolError> {
+        let FieldKind::Map {
+            value: SingularKind::Enum(eidx),
+            ..
+        } = field.kind
+        else {
+            return Ok(());
+        };
+        let enumeration = &self.enums[eidx.0 as usize];
+        if let Some(first) = enumeration.values.first().filter(|value| value.number != 0) {
+            return Err(PoolError::MapEnumFirstValueNotZero {
+                field: format!("{}.{}", message.full_name, field.name),
+                enum_name: enumeration.full_name.clone(),
+                number: first.number,
+            });
+        }
+        Ok(())
     }
 
     fn resolve_singular(
