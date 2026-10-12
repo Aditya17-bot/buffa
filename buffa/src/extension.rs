@@ -33,9 +33,13 @@
 //!
 //! # Panics
 //!
-//! [`extension`], [`set_extension`], and [`clear_extension`] panic if the
-//! descriptor's [`extendee`](Extension::extendee) does not match the extendee
-//! message's [`PROTO_FQN`](ExtensionSet::PROTO_FQN). This catches bugs like
+//! [`Extension::new`] and [`Extension::with_default`] panic if the extension
+//! field number is 0 or greater than `i32::MAX`.
+//!
+//! [`extension`], [`extension_or_default`], [`set_extension`],
+//! [`try_set_extension`], and [`clear_extension`] panic if the descriptor's
+//! [`extendee`](Extension::extendee) does not match the extendee message's
+//! [`PROTO_FQN`](ExtensionSet::PROTO_FQN). This catches bugs like
 //! `field_options.extension(&MESSAGE_LEVEL_OPTION)` at the first call site
 //! (matches protobuf-go, which panics, and protobuf-es, which throws).
 //! [`has_extension`] returns `false` gracefully on mismatch — "is this
@@ -66,6 +70,7 @@
 //!
 //! [`extension`]: ExtensionSet::extension
 //! [`set_extension`]: ExtensionSet::set_extension
+//! [`try_set_extension`]: ExtensionSet::try_set_extension
 //! [`clear_extension`]: ExtensionSet::clear_extension
 //! [`has_extension`]: ExtensionSet::has_extension
 //! [`extension_or_default`]: ExtensionSet::extension_or_default
@@ -91,8 +96,8 @@ pub struct Extension<C: ExtensionCodec> {
     /// Fully-qualified proto name of the extendee (e.g.
     /// `"google.protobuf.FieldOptions"`), no leading dot.
     ///
-    /// Checked against [`ExtensionSet::PROTO_FQN`] on `extension()`,
-    /// `set_extension()`, and `clear_extension()` — a mismatch panics.
+    /// Checked against [`ExtensionSet::PROTO_FQN`] by the accessors that the
+    /// module-level `# Panics` section lists — a mismatch panics.
     /// `has_extension()` stays graceful (returns `false`), matching
     /// protobuf-go and protobuf-es precedent.
     extendee: &'static str,
@@ -108,12 +113,44 @@ impl<C: ExtensionCodec> Extension<C> {
     ///
     /// `extendee` is the fully-qualified proto type name (no leading dot) of
     /// the message this extension extends — e.g. `"google.protobuf.FieldOptions"`.
-    /// Passing an extension with a mismatched extendee to `extension()` /
-    /// `set_extension()` / `clear_extension()` will panic.
+    /// Passing an extension with a mismatched extendee to an accessor that
+    /// reads, writes or clears it panics; the
+    /// [module documentation](crate::extension#panics) lists those accessors.
     ///
-    /// Field number `0` is invalid in protobuf. Codegen never emits it;
-    /// a descriptor constructed with `0` will never match valid wire data.
+    /// # Panics
+    ///
+    /// Panics if `number` is 0 or greater than `i32::MAX`. In a `const` item
+    /// the panic is a compile error.
+    ///
+    /// The upper bound is `i32::MAX` because an extension of a message with
+    /// `option message_set_wire_format = true` can have a number up to that.
+    /// For any other extendee the largest valid number is
+    /// [`MAX_FIELD_NUMBER`](crate::encoding::MAX_FIELD_NUMBER): with a larger
+    /// one, `set_extension()` stores a field that encodes with a tag decoders
+    /// reject.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use buffa::extension::codecs::Int32;
+    /// use buffa::Extension;
+    ///
+    /// const WEIGHT: Extension<Int32> = Extension::new(50001, "my.pkg.Options");
+    /// assert_eq!(WEIGHT.number(), 50001);
+    /// ```
+    ///
+    /// A `const` with the number 0 does not compile:
+    ///
+    /// ```compile_fail,E0080
+    /// use buffa::extension::codecs::Int32;
+    /// use buffa::Extension;
+    ///
+    /// const ZERO: Extension<Int32> = Extension::new(0, "my.pkg.Options");
+    /// assert_eq!(ZERO.number(), 0);
+    /// ```
+    #[track_caller]
     pub const fn new(number: u32, extendee: &'static str) -> Self {
+        assert_valid_extension_field_number(number);
         Self {
             number,
             extendee,
@@ -132,11 +169,18 @@ impl<C: ExtensionCodec> Extension<C> {
     /// call. For `Copy` scalars codegen emits a `const fn`; for `String` and
     /// `bytes` a regular `fn` (allocates on each call — same cost as a
     /// hand-written `.unwrap_or_else(|| "x".into())`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `number` is 0 or greater than `i32::MAX`, as
+    /// [`new`](Self::new) does.
+    #[track_caller]
     pub const fn with_default(
         number: u32,
         extendee: &'static str,
         default: fn() -> C::Value,
     ) -> Self {
+        assert_valid_extension_field_number(number);
         Self {
             number,
             extendee,
@@ -156,10 +200,27 @@ impl<C: ExtensionCodec> Extension<C> {
     }
 }
 
+/// Asserts the range that [`Extension::new`] documents, where the reason for
+/// the upper bound is given.
+///
+/// The implementation-reserved band (19000 to 19999) is not checked. It is a
+/// schema rule, which `DescriptorPool` applies when it loads a descriptor
+/// set; a number in the band encodes and decodes like any other.
+#[track_caller]
+const fn assert_valid_extension_field_number(number: u32) {
+    assert!(number != 0, "extension field number must not be 0");
+    assert!(
+        number <= crate::message_set::MAX_TYPE_ID,
+        "extension field number must be at most i32::MAX"
+    );
+}
+
 /// Asserts that `ext` actually extends `Self`. Called from `extension()`,
-/// `set_extension()`, and `clear_extension()` (but NOT `has_extension()` —
-/// asking "is this extension set here" has a legitimate answer of `false`
-/// when it can't extend here, matching protobuf-go and protobuf-es).
+/// `try_set_extension()`, and `clear_extension()`; the other accessors in the
+/// module-level `# Panics` list reach it through those. `has_extension()`
+/// does NOT call it — asking "is this extension set here" has a legitimate
+/// answer of `false` when it can't extend here, matching protobuf-go and
+/// protobuf-es.
 ///
 /// `#[track_caller]` so the panic points at the user's call site, not here.
 #[track_caller]
@@ -244,9 +305,11 @@ pub trait ExtensionSet {
     /// Fully-qualified proto type name of this message (no leading dot),
     /// e.g. `"google.protobuf.FieldOptions"`.
     ///
-    /// Checked against [`Extension::extendee`] on every `extension()`,
-    /// `set_extension()`, and `clear_extension()` call. A mismatch panics:
-    /// passing an extension for the wrong message is a bug in the caller.
+    /// Checked against [`Extension::extendee`] on every call of an accessor
+    /// that reads, writes or clears an extension; the
+    /// [module documentation](crate::extension#panics) lists them. A mismatch
+    /// panics: passing an extension for the wrong message is a bug in the
+    /// caller.
     ///
     /// Equal to [`MessageName::FULL_NAME`](crate::MessageName::FULL_NAME)
     /// for generated messages — both come from the same `proto_fqn` in
@@ -1276,6 +1339,70 @@ mod tests {
         assert_eq!(E.extendee(), CARRIER);
         let copy = E; // still Copy with the fn-pointer field
         assert_eq!(copy.number(), 1);
+    }
+
+    #[test]
+    fn extension_constructors_validate_field_numbers() {
+        let valid_numbers = [
+            1,
+            crate::encoding::FIRST_RESERVED_FIELD_NUMBER,
+            crate::encoding::LAST_RESERVED_FIELD_NUMBER,
+            crate::encoding::MAX_FIELD_NUMBER,
+            crate::encoding::MAX_FIELD_NUMBER + 1,
+            i32::MAX as u32,
+        ];
+        for number in valid_numbers {
+            assert_eq!(Extension::<Int32>::new(number, CARRIER).number(), number);
+            assert_eq!(
+                Extension::<Int32>::with_default(number, CARRIER, || 0).number(),
+                number
+            );
+        }
+
+        let invalid_numbers = [0, i32::MAX as u32 + 1, u32::MAX];
+        for number in invalid_numbers {
+            assert!(
+                std::panic::catch_unwind(|| Extension::<Int32>::new(number, CARRIER)).is_err(),
+                "new accepted field number {number}"
+            );
+            assert!(
+                std::panic::catch_unwind(|| {
+                    Extension::<Int32>::with_default(number, CARRIER, || 0)
+                })
+                .is_err(),
+                "with_default accepted field number {number}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "extension field number must not be 0")]
+    fn extension_number_zero_panic_names_the_rule() {
+        let _ = Extension::<Int32>::new(0, CARRIER);
+    }
+
+    #[test]
+    #[should_panic(expected = "extension field number must be at most i32::MAX")]
+    fn extension_number_above_i32_max_panic_names_the_rule() {
+        let _ = Extension::<Int32>::with_default(i32::MAX as u32 + 1, CARRIER, || 0);
+    }
+
+    /// A MessageSet item is stored as a length-delimited unknown field whose
+    /// number is the item's type ID, and a type ID can pass
+    /// `MAX_FIELD_NUMBER`. A `const` extension with such a number compiles
+    /// and reads the item.
+    #[test]
+    fn extension_number_above_max_field_number_reads_message_set_item() {
+        const TYPE_ID: u32 = i32::MAX as u32;
+        const E: Extension<BytesCodec> = Extension::new(TYPE_ID, CARRIER);
+        const fn empty() -> Vec<u8> {
+            Vec::new()
+        }
+        const D: Extension<BytesCodec> = Extension::with_default(TYPE_ID, CARRIER, empty);
+        let mut c = Carrier::default();
+        c.unknown.push(ld(TYPE_ID, vec![1, 2]));
+        assert_eq!(c.extension(&E), Some(vec![1, 2]));
+        assert_eq!(c.extension_or_default(&D), vec![1, 2]);
     }
 
     // ── Extendee identity check ─────────────────────────────────────────────
