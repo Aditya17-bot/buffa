@@ -450,6 +450,15 @@ pub enum PoolError {
         start: Option<i32>,
         end: Option<i32>,
     },
+    /// An extension range's exclusive end exceeds
+    /// [`buffa::encoding::MAX_FIELD_NUMBER`] + 1. Messages with
+    /// `message_set_wire_format` enabled may declare larger ranges because
+    /// their extension numbers are encoded as int32 values rather than tags.
+    ExtensionRangeEndTooLarge {
+        message: String,
+        start: u32,
+        end: u32,
+    },
     /// A message in a proto3 file declares an extension range.
     ExtensionRangeInProto3 { message: String },
     /// A field or extension in a proto3 file has `TYPE_GROUP`. Proto2 uses
@@ -803,6 +812,15 @@ impl core::fmt::Display for PoolError {
                 "message {message} extension range {}..{} is invalid; bounds must satisfy 0 < start < end",
                 Bound(*start),
                 Bound(*end),
+            ),
+            Self::ExtensionRangeEndTooLarge {
+                message,
+                start,
+                end,
+            } => write!(
+                f,
+                "message {message} extension range {start}..{end} exceeds maximum end {}",
+                buffa::encoding::MAX_FIELD_NUMBER + 1,
             ),
             Self::ExtensionRangeInProto3 { message } => {
                 write!(f, "message {message} declares an extension range in proto3")
@@ -2161,6 +2179,15 @@ impl DescriptorPool {
                     end: r.end,
                 });
             };
+            if end > buffa::encoding::MAX_FIELD_NUMBER + 1
+                && !msg.options.message_set_wire_format.unwrap_or(false)
+            {
+                return Err(PoolError::ExtensionRangeEndTooLarge {
+                    message: fqn.clone(),
+                    start,
+                    end,
+                });
+            }
             if reserved_ranges.overlaps(start, end) {
                 return Err(PoolError::ReservedExtensionRange {
                     message: fqn.clone(),
