@@ -632,7 +632,8 @@ impl Config {
     /// Requires [`include_file`](Self::include_file) (the shared module is
     /// emitted into that file at the tree root) and reflection to be enabled;
     /// [`compile`](Self::compile) errors otherwise. The include file name must
-    /// be a bare file name, not a path. See
+    /// be a bare file name, not a path: the sidecar is named after the stem
+    /// alone, so `a/gen.rs` and `b/gen.rs` would share one sidecar. See
     /// [`CodeGenConfig::shared_descriptor_pool`].
     ///
     /// In this mode the generated tree must be consumed *through the include
@@ -2201,7 +2202,14 @@ impl Config {
     ///   `build.rs` via `include!(concat!(env!("OUT_DIR"), "/<name>"))`.
     /// - **Explicit `out_dir`**: emits sibling-relative `include!("foo.rs")`,
     ///   for checking the generated code into the source tree and referencing
-    ///   it as a module (e.g. `mod gen;`).
+    ///   it as a module (e.g. `mod gen;`). The include file then has to sit in
+    ///   `out_dir` itself: `name` must be a bare file name, and
+    ///   [`compile`](Self::compile) rejects a name with a directory part.
+    ///
+    /// With [`shared_descriptor_pool`](Self::shared_descriptor_pool), `name`
+    /// must be a bare file name in both modes. In `$OUT_DIR` mode without the
+    /// shared pool, `name` may have a directory part (`"nested/_include.rs"`),
+    /// and [`compile`](Self::compile) creates that directory.
     ///
     /// # Example — `build.rs` / `$OUT_DIR`
     ///
@@ -2248,7 +2256,9 @@ impl Config {
     /// - [`shared_descriptor_pool`](Self::shared_descriptor_pool) is set
     ///   without reflection enabled, without
     ///   [`include_file`](Self::include_file), or with an `include_file`
-    ///   lacking a file-name stem (the sidecar is named after it)
+    ///   that is not a bare file name or lacks a file-name stem
+    /// - an explicit [`out_dir`](Self::out_dir) is combined with an
+    ///   [`include_file`](Self::include_file) that is not a bare file name
     /// - `protoc` or `buf` cannot be found on `PATH` (when using those sources)
     /// - the proto compiler exits with a non-zero status (syntax errors,
     ///   missing imports, etc.)
@@ -2315,17 +2325,33 @@ impl Config {
             // without one ("", ".", "..") here rather than writing a stray
             // misnamed sidecar before the include-file write fails. The stem
             // is computed once here and reused when the sidecar is written.
-            match Path::new(include_name).file_stem().and_then(|s| s.to_str()) {
-                Some(stem) => Some(format!("{stem}.descriptor_set.binpb")),
-                None => {
-                    return Err(format!(
-                        "shared_descriptor_pool requires include_file to have a file name \
-                         (the descriptor-set sidecar is named after its stem); \
-                         got {include_name:?}"
-                    )
-                    .into());
-                }
+            let Some(stem) = Path::new(include_name).file_stem().and_then(|s| s.to_str()) else {
+                return Err(format!(
+                    "shared_descriptor_pool requires include_file to have a file name \
+                     (the descriptor-set sidecar is named after its stem); \
+                     got {include_name:?}"
+                )
+                .into());
+            };
+            // The sidecar is named after the stem alone and written at the
+            // output root, so `a/gen.rs` and `b/gen.rs` from two compile()
+            // calls would share `gen.descriptor_set.binpb`, and the first tree
+            // would build its pool from the second tree's descriptors.
+            if !is_bare_file_name(include_name) {
+                let reason = if include_name.contains('\0') {
+                    NUL_IN_FILE_NAME
+                } else {
+                    "the descriptor-set sidecar is named after the stem alone and \
+                     written at the output root, so include files in two directories \
+                     would share it"
+                };
+                return Err(format!(
+                    "shared_descriptor_pool requires include_file to be a bare file name \
+                     ({reason}); got {include_name:?}"
+                )
+                .into());
             }
+            Some(format!("{stem}.descriptor_set.binpb"))
         } else {
             None
         };
@@ -2337,6 +2363,25 @@ impl Config {
         // `include!(concat!(env!("OUT_DIR"), "/_include.rs"))` from src/
         // still resolves to absolute paths.
         let relative_includes = self.out_dir.is_some();
+        // Those relative paths name siblings of the include file, so the
+        // include file has to sit in the output directory itself, with or
+        // without the shared pool (which has already required a bare name
+        // above). `$OUT_DIR` mode emits absolute paths, which resolve from any
+        // directory.
+        if let Some(include_name) = self.include_file.as_deref() {
+            if relative_includes && !is_bare_file_name(include_name) {
+                let reason = if include_name.contains('\0') {
+                    NUL_IN_FILE_NAME
+                } else {
+                    "the generated include! paths are relative to the include file"
+                };
+                return Err(format!(
+                    "include_file must be a bare file name when out_dir is set \
+                     ({reason}); got {include_name:?}"
+                )
+                .into());
+            }
+        }
         let out_dir = self
             .out_dir
             .or_else(|| std::env::var("OUT_DIR").ok().map(PathBuf::from))
@@ -2437,9 +2482,11 @@ impl Config {
                 // the bytes never expand into Rust byte-literal source. Every
                 // package's `__buffa::reflect` delegates to that module.
                 // The sidecar name was derived from the include file's stem up
-                // front, so two compile() calls sharing an out_dir but writing
-                // different include files don't clobber each other's
-                // descriptor set.
+                // front, so two compile() calls sharing an out_dir don't
+                // clobber each other's descriptor set as long as their include
+                // file stems differ (`a.rs` and `b.rs`; `gen.rs` and `gen.txt`
+                // share `gen.descriptor_set.binpb`). The bare-name requirement
+                // keeps two directories from hiding one stem.
                 let fds_bytes = buffa_codegen::encode_descriptor_set(
                     &fds.file,
                     &self.codegen_config.feature_overrides,
@@ -2477,6 +2524,10 @@ impl Config {
                 tree
             };
             let include_path = out_dir.join(include_name);
+            // In `$OUT_DIR` mode the name may have a directory part.
+            if let Some(parent) = include_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             write_if_changed(&include_path, include_content.as_bytes())?;
         }
 
@@ -2511,6 +2562,29 @@ impl Config {
 
         Ok(())
     }
+}
+
+/// The reason given when an include file name contains a NUL byte.
+const NUL_IN_FILE_NAME: &str = "a file name cannot contain a NUL byte";
+
+/// Whether `name` places a file directly in the directory it is joined to. A
+/// leading `./` is accepted; a backslash and a drive prefix are rejected on
+/// every platform, so one build script behaves the same everywhere. A name
+/// containing a NUL byte, which cannot name a file, is rejected too.
+fn is_bare_file_name(name: &str) -> bool {
+    let name = name.strip_prefix("./").unwrap_or(name);
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return false;
+    }
+    if name.as_bytes().get(1) == Some(&b':')
+        && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+    {
+        return false;
+    }
+    // With the separators and the drive prefix ruled out, `name` is one
+    // component: empty, `.`, `..`, or the file name itself.
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 impl Default for Config {
@@ -2895,6 +2969,96 @@ mod tests {
         assert!(
             err.to_string().contains("file name"),
             "error should name the degenerate include_file: {err}"
+        );
+    }
+
+    #[test]
+    fn is_bare_file_name_accepts_names_in_the_joined_directory() {
+        for name in ["gen_mod.rs", ".gen_mod.rs", "gen_mod", "./gen_mod.rs"] {
+            assert!(is_bare_file_name(name), "{name:?} should be bare");
+        }
+    }
+
+    #[test]
+    fn is_bare_file_name_rejects_paths_and_nul() {
+        for name in [
+            "",
+            ".",
+            "./",
+            "..",
+            "../gen_mod.rs",
+            "nested/gen_mod.rs",
+            "nested\\gen_mod.rs",
+            "/gen_mod.rs",
+            "C:gen_mod.rs",
+            "gen_mod.rs/",
+            "gen_mod.rs\0",
+        ] {
+            assert!(!is_bare_file_name(name), "{name:?} should not be bare");
+        }
+    }
+
+    #[test]
+    fn shared_descriptor_pool_rejects_path_include_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+
+        let err = Config::new()
+            .generate_reflection(true)
+            .shared_descriptor_pool(true)
+            .include_file("nested/gen_mod.rs")
+            .descriptor_set_bytes(Vec::new())
+            .out_dir(dir.path())
+            .compile()
+            .expect_err("shared descriptor include_file paths must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("bare file name") && message.contains("sidecar"),
+            "error should name the bare-file requirement and its reason: {message}"
+        );
+    }
+
+    #[test]
+    fn shared_descriptor_pool_rejects_nul_include_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = Config::new()
+            .generate_reflection(true)
+            .shared_descriptor_pool(true)
+            .include_file("gen_mod.rs\0")
+            .descriptor_set_bytes(Vec::new())
+            .out_dir(dir.path())
+            .compile()
+            .expect_err("shared descriptor include_file names must not contain NUL");
+        let message = err.to_string();
+        assert!(
+            message.contains("bare file name") && message.contains("NUL"),
+            "error should name the bare-file requirement and the NUL byte: {message}"
+        );
+        assert!(
+            !message.contains("sidecar"),
+            "a NUL name is not a path problem: {message}"
+        );
+    }
+
+    #[test]
+    fn explicit_out_dir_rejects_nul_include_file() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let err = Config::new()
+            .include_file("gen_mod.rs\0")
+            .descriptor_set_bytes(Vec::new())
+            .out_dir(dir.path())
+            .compile()
+            .expect_err("include_file names must not contain NUL");
+        let message = err.to_string();
+        assert!(
+            message.contains("bare file name") && message.contains("NUL"),
+            "error should name the bare-file requirement and the NUL byte: {message}"
+        );
+        assert!(
+            !message.contains("relative to the include file"),
+            "a NUL name is not a path problem: {message}"
         );
     }
 
