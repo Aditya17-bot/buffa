@@ -215,6 +215,22 @@ impl<'a> DecodeContext<'a> {
         self.element_memory_remaining.map(core::cell::Cell::get)
     }
 
+    /// Spend what is left of the element-memory budget, so that every later
+    /// nonzero charge on this context fails.
+    ///
+    /// A caller that drops a value after
+    /// [`ElementMemoryLimitExceeded`](DecodeError::ElementMemoryLimitExceeded)
+    /// and keeps decoding with the same context uses this to make the first
+    /// value that does not fit the last one it reads: a failed charge leaves
+    /// the budget unchanged, so a smaller value after it could otherwise
+    /// still be charged. The bound on the total does not depend on this
+    /// call; it comes from never refunding a charge.
+    pub(crate) fn exhaust_element_memory(&self) {
+        if let Some(cell) = self.element_memory_remaining {
+            cell.set(0);
+        }
+    }
+
     /// Charge `bytes` against the shared element-memory budget.
     ///
     /// Call **before** materializing an element of a repeated
