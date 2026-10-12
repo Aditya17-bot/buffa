@@ -58,7 +58,8 @@ fn clone_options<T: Clone + Default, P: buffa::ProtoBox<T>>(
 
 /// Maximum length of a fully-qualified symbol name, in bytes.
 ///
-/// Matches protoc's own cap. Two things depend on it, neither obvious.
+/// Field and oneof names are exempt. Two things depend on this limit,
+/// neither obvious.
 ///
 /// A name is built by concatenating its parent's, and every descendant
 /// stores its own full copy — four of them, across the symbol table, the
@@ -974,6 +975,8 @@ enum Definition {
 enum SymbolKind {
     Message,
     Enum,
+    Field,
+    Oneof,
     Service,
     Method,
     Extension,
@@ -1844,10 +1847,10 @@ impl DescriptorPool {
     /// The `FileDescriptorProto` that declares a fully-qualified symbol, the
     /// way gRPC server reflection's `FindFileContainingSymbol` resolves it.
     ///
-    /// Resolves messages (including nested), enums (including nested),
-    /// services, methods (`pkg.Service.Method`), and extensions — every
-    /// symbol kind a reflection client queries. `O(log n)` over the symbol
-    /// index.
+    /// Resolves messages (including nested), fields, oneofs, enums (including
+    /// nested), enum values, services, methods (`pkg.Service.Method`), and
+    /// extensions — every symbol kind a reflection client queries. `O(log n)`
+    /// over the symbol index.
     #[must_use]
     pub fn file_containing_symbol(&self, full_name: &str) -> Option<&FileDescriptorProto> {
         let name = full_name.strip_prefix('.').unwrap_or(full_name);
@@ -1858,7 +1861,7 @@ impl DescriptorPool {
     // ── Pass 1: register names ──────────────────────────────────────────────
 
     fn register_symbol(&mut self, fqn: &str, kind: SymbolKind) -> Result<(), PoolError> {
-        if fqn.len() > MAX_SYMBOL_LEN {
+        if !matches!(kind, SymbolKind::Field | SymbolKind::Oneof) && fqn.len() > MAX_SYMBOL_LEN {
             return Err(PoolError::NameTooLong {
                 len: fqn.len(),
                 limit: MAX_SYMBOL_LEN,
@@ -1991,6 +1994,7 @@ impl DescriptorPool {
                     name: oneof_name.to_string(),
                 });
             }
+            self.register_symbol(&format!("{fqn}.{oneof_name}"), SymbolKind::Oneof)?;
             oneofs.push(OneofDescriptor {
                 name: oneof_name.to_string(),
                 field_indices: Vec::new(),
@@ -2073,9 +2077,7 @@ impl DescriptorPool {
                     name: fd.name.clone(),
                 });
             }
-            if oneof_names.contains(fd.name.as_str()) {
-                return Err(PoolError::DuplicateName(format!("{fqn}.{}", fd.name)));
-            }
+            self.register_symbol(&format!("{fqn}.{}", fd.name), SymbolKind::Field)?;
             if enforce_json_names
                 && fd.json_name != fd.name
                 && field_names.insert(fd.json_name.clone(), i).is_some()
