@@ -2848,6 +2848,141 @@ fn disjoint_extension_ranges_are_accepted_in_declaration_order() {
 }
 
 #[test]
+fn proto3_messagesets_are_rejected_transactionally() {
+    use buffa_descriptor::generated::descriptor::{
+        DescriptorProto, FileDescriptorProto, FileDescriptorSet, MessageOptions,
+    };
+
+    for nested in [false, true] {
+        let message = DescriptorProto {
+            name: Some("MessageSet".into()),
+            options: MessageOptions {
+                message_set_wire_format: Some(true),
+                ..Default::default()
+            }
+            .into(),
+            ..Default::default()
+        };
+        let full_name = if nested {
+            "invalid.test.Parent.MessageSet"
+        } else {
+            "invalid.test.MessageSet"
+        };
+        let set = FileDescriptorSet {
+            file: vec![FileDescriptorProto {
+                name: Some("proto3-messageset.proto".into()),
+                package: Some("invalid.test".into()),
+                syntax: Some("proto3".into()),
+                message_type: vec![if nested {
+                    DescriptorProto {
+                        name: Some("Parent".into()),
+                        nested_type: vec![message],
+                        ..Default::default()
+                    }
+                } else {
+                    message
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_set_rejected_without_mutating_pool(
+            "proto3-messageset.proto",
+            full_name,
+            set,
+            |err| {
+                assert!(
+                    matches!(err, PoolError::MessageSetInProto3 { message } if message == full_name),
+                    "{err:?}"
+                );
+                assert_eq!(
+                    err.to_string(),
+                    format!("message {full_name} uses MessageSet wire format in proto3")
+                )
+            },
+        );
+    }
+}
+
+/// protoc reports the extension range before the option. A proto3 message
+/// with both keeps the error it had before `MessageSetInProto3` existed.
+#[test]
+fn proto3_messagesets_with_extension_ranges_report_the_range() {
+    use buffa_descriptor::generated::descriptor::descriptor_proto::ExtensionRange;
+    use buffa_descriptor::generated::descriptor::{
+        DescriptorProto, FileDescriptorProto, FileDescriptorSet, MessageOptions,
+    };
+
+    let set = FileDescriptorSet {
+        file: vec![FileDescriptorProto {
+            name: Some("proto3-messageset-range.proto".into()),
+            package: Some("invalid.test".into()),
+            syntax: Some("proto3".into()),
+            message_type: vec![DescriptorProto {
+                name: Some("MessageSet".into()),
+                extension_range: vec![ExtensionRange {
+                    start: Some(100),
+                    end: Some(200),
+                    ..Default::default()
+                }],
+                options: MessageOptions {
+                    message_set_wire_format: Some(true),
+                    ..Default::default()
+                }
+                .into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let err = DescriptorPool::new(set).unwrap_err();
+    assert!(
+        matches!(&err, PoolError::ExtensionRangeInProto3 { message } if message == "invalid.test.MessageSet"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn messageset_options_remain_valid_outside_proto3() {
+    use buffa_descriptor::generated::descriptor::{
+        DescriptorProto, Edition, FileDescriptorProto, FileDescriptorSet, MessageOptions,
+    };
+
+    for (syntax, edition) in [
+        (None, None),
+        (Some("proto2"), None),
+        (Some("proto3"), None),
+        (Some("editions"), Some(Edition::EDITION_2023)),
+    ] {
+        for enabled in [None, Some(false), Some(true)] {
+            if syntax == Some("proto3") && enabled == Some(true) {
+                continue;
+            }
+            let set = FileDescriptorSet {
+                file: vec![FileDescriptorProto {
+                    name: Some("messageset-option.proto".into()),
+                    syntax: syntax.map(str::to_owned),
+                    edition,
+                    message_type: vec![DescriptorProto {
+                        name: Some("MessageSet".into()),
+                        options: MessageOptions {
+                            message_set_wire_format: enabled,
+                            ..Default::default()
+                        }
+                        .into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            DescriptorPool::new(set).unwrap();
+        }
+    }
+}
+
+#[test]
 fn duplicate_proto_field_names_are_rejected_without_mutating_pool() {
     use buffa_descriptor::generated::descriptor::field_descriptor_proto::Type;
     use buffa_descriptor::generated::descriptor::DescriptorProto;
