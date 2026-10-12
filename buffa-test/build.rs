@@ -170,8 +170,7 @@ fn read_proto(file: &str) -> String {
 }
 
 /// A message with 300 fields, of which 280 are messages, so that a table needs
-/// more than 255 entries (which turns off its dense array) and more than 255
-/// field descriptors.
+/// more than 255 entries and more than 255 field descriptors.
 fn wide_proto() -> String {
     let mut proto = String::from(
         "syntax = \"proto3\";\npackage wide;\nmessage Leaf { int32 x = 1; }\nmessage Wide {\n",
@@ -183,8 +182,9 @@ fn wide_proto() -> String {
         proto.push_str(&format!("  int32 f{n} = {n};\n"));
     }
     proto.push_str("}\n");
-    // Messages one field either side of the 255 that a dense array cannot
-    // index.
+    // Messages one field either side of 255 entries, the most that a dense
+    // array's `u8` slots can count. Each has a dense array for its fields
+    // numbered below 64, and the table searches for the rest.
     for count in [254, 255, 256] {
         proto.push_str(&format!("message W{count} {{\n"));
         for n in 1..=count {
@@ -192,8 +192,8 @@ fn wide_proto() -> String {
         }
         proto.push_str("}\n");
     }
-    // A oneof in a message with more entries than a dense array can index, so
-    // the table searches for its members.
+    // A oneof whose members are numbered 255 and up, past the dense array, in
+    // a message with more than 255 entries.
     proto.push_str("enum WideColor {\n  WIDE_UNSPECIFIED = 0;\n  WIDE_RED = 1;\n}\n");
     proto.push_str("message WideOneof {\n");
     for n in 1..=254 {
