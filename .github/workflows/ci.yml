@@ -392,6 +392,9 @@ jobs:
       - name: Check buffa-descriptor no_std + json/reflect/text/views
         run: cargo check -p buffa-descriptor --no-default-features --features json,reflect,text,views
 
+      - name: Test buffa-descriptor no_std reflective JSON
+        run: cargo test -p buffa-descriptor --no-default-features --features json,reflect --test '*'
+
       - name: Check buffa-proto-options no_std
         run: cargo check -p buffa-proto-options --no-default-features
 
