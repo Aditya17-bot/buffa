@@ -369,19 +369,16 @@ pub enum PoolError {
     /// An extension always has presence. A proto3 field reports
     /// [`Proto3FieldWithDefault`](Self::Proto3FieldWithDefault) instead.
     ImplicitPresenceFieldWithDefault { field: String },
-    /// A singular enum field has implicit presence but uses a closed enum.
-    /// Closed enum fields require presence to distinguish an unset field
-    /// from its default value.
+    /// A singular enum field of an editions file has implicit presence but
+    /// uses a closed enum. Closed enum fields require presence to
+    /// distinguish an unset field from its default value.
     ///
     /// A map with a closed enum value type is rejected through the `value`
-    /// field of its entry message, which is the field this error names: in
-    /// a proto3 file, and in an editions file where the entry inherits
-    /// `features.field_presence = IMPLICIT`.
+    /// field of its entry message, which is the field this error names,
+    /// when the entry inherits `features.field_presence = IMPLICIT`.
     ///
-    /// In a proto3 file the rule covers a singular field without `optional`
-    /// and a map value. protoc rejects every enum field and extension of a
-    /// proto3 file whose enum is closed; the pool does not yet reject the
-    /// repeated, `optional`, oneof and extension cases.
+    /// A proto3 file reports every field that names a closed enum as
+    /// [`Proto3ClosedEnumField`](Self::Proto3ClosedEnumField).
     ImplicitPresenceClosedEnum { field: String },
     /// A field marked `proto3_optional` is not declared in a proto3 file.
     Proto3OptionalOutsideProto3 { field: String },
@@ -499,6 +496,23 @@ pub enum PoolError {
     /// A field or extension in a proto3 file has `TYPE_GROUP`. Proto2 uses
     /// legacy groups; editions use `message_encoding = DELIMITED`.
     GroupFieldInProto3 { field: String },
+    /// An extension declared in a proto3 file extends a message that is not
+    /// an options message. A proto3 file declares extensions only to define
+    /// custom options, so the extendee must be `FileOptions`,
+    /// `MessageOptions`, `FieldOptions`, `OneofOptions`, `EnumOptions`,
+    /// `EnumValueOptions`, `ServiceOptions`, `MethodOptions` or
+    /// `ExtensionRangeOptions` in package `google.protobuf`. The same nine
+    /// names in package `proto2` are accepted too, as protoc accepts them.
+    Proto3ExtensionTargetNotOptions { field: String, extendee: String },
+    /// A field of a proto3 message, or an extension declared in a proto3
+    /// file, names a closed enum: one whose `features.enum_type` resolves to
+    /// `CLOSED`, which every enum of a proto2 file does.
+    ///
+    /// A map with a closed enum value type is rejected through the `value`
+    /// field of its entry message, which is the field this error names. A
+    /// field whose own options set `features.enum_type = OPEN` is open
+    /// whatever its enum declares, and links.
+    Proto3ClosedEnumField { field: String, enum_name: String },
     /// Two extension ranges declared by the same message overlap. `end` is
     /// exclusive, as in `DescriptorProto.ExtensionRange`. Carries both ranges
     /// as declared: `start..end` is the later of the two in declaration
@@ -886,6 +900,14 @@ impl core::fmt::Display for PoolError {
             Self::GroupFieldInProto3 { field } => {
                 write!(f, "field {field} uses a group type in proto3")
             }
+            Self::Proto3ExtensionTargetNotOptions { field, extendee } => write!(
+                f,
+                "extension {field} is declared in a proto3 file and extends {extendee}, which is not an options message"
+            ),
+            Self::Proto3ClosedEnumField { field, enum_name } => write!(
+                f,
+                "field {field} is declared in a proto3 file and uses the closed enum {enum_name}"
+            ),
             Self::OverlappingExtensionRange {
                 message,
                 start,
@@ -1138,6 +1160,35 @@ struct LinkScope<'a> {
     visible: Option<&'a BTreeSet<usize>>,
 }
 
+/// Whether `file` declares `syntax = "proto3"`.
+fn is_proto3(file: &FileDescriptorProto) -> bool {
+    file.syntax.as_deref() == Some("proto3")
+}
+
+/// The messages of `descriptor.proto` that carry options. A proto3 file
+/// defines custom options by extending them.
+const OPTIONS_MESSAGES: [&str; 9] = [
+    "FileOptions",
+    "MessageOptions",
+    "FieldOptions",
+    "OneofOptions",
+    "EnumOptions",
+    "EnumValueOptions",
+    "ServiceOptions",
+    "MethodOptions",
+    "ExtensionRangeOptions",
+];
+
+/// Whether a proto3 file may extend the message `full_name`: one of
+/// [`OPTIONS_MESSAGES`] in package `google.protobuf` or `proto2`, the two
+/// packages protoc accepts.
+fn is_proto3_extendee(full_name: &str) -> bool {
+    full_name
+        .strip_prefix("google.protobuf.")
+        .or_else(|| full_name.strip_prefix("proto2."))
+        .is_some_and(|name| OPTIONS_MESSAGES.contains(&name))
+}
+
 impl<'a> LinkScope<'a> {
     /// The scope for links made from `file`, which the pool stores at `index`.
     fn for_file(
@@ -1148,7 +1199,7 @@ impl<'a> LinkScope<'a> {
         let syntax = file.syntax.as_deref();
         Self {
             file: index,
-            proto3: syntax == Some("proto3"),
+            proto3: is_proto3(file),
             allows_required_labels: !matches!(syntax, Some("proto3" | "editions")),
             visible,
         }
@@ -1501,7 +1552,6 @@ impl DescriptorPool {
             }
         }
         self.finalize_field_enum_types(first_new_message, first_new_extension);
-        self.check_linked_enum_fields(first_new_message)?;
 
         // Record the symbol → file index (for `FindFileContainingSymbol`).
         for (i, f) in new_files.iter().enumerate() {
@@ -1510,8 +1560,7 @@ impl DescriptorPool {
         debug_assert_eq!(self.message_file.len(), self.messages.len());
         debug_assert_eq!(self.enum_file.len(), self.enums.len());
         self.files.extend(new_files);
-
-        Ok(())
+        self.check_linked_enum_fields(first_new_message)
     }
 
     /// Under [`LinkOptions::with_required_dependencies`], reject a
@@ -2548,11 +2597,22 @@ impl DescriptorPool {
         };
         self.register_symbol(&fqn, SymbolKind::Extension)?;
         let extendee = self.resolve_message_type_name(ext.extendee.as_deref(), &fqn, scope)?;
+        // A proto3 file declares extensions only to define custom options.
+        let extendee_name = &self.messages[extendee.0 as usize].full_name;
+        if scope.proto3 && !is_proto3_extendee(extendee_name) {
+            return Err(PoolError::Proto3ExtensionTargetNotOptions {
+                field: fqn,
+                extendee: extendee_name.clone(),
+            });
+        }
         // The field links exactly like a declared field. `containing_msg` is
         // `None` because extensions cannot be map fields (a map requires a
         // synthetic MapEntry message nested in the declaring message, which
         // an `extend` block cannot contain).
         let mut field = self.link_field(scope_fqn, ext, parent_features, None, scope)?;
+        if scope.proto3 {
+            self.check_proto3_closed_enum(&field, || fqn.clone())?;
+        }
         // Extensions cannot be oneof members. A malformed FieldDescriptorProto
         // carrying `oneof_index` would otherwise make `set()` clear the
         // *extendee's* declared oneof members (the index would be interpreted
@@ -2952,14 +3012,24 @@ impl DescriptorPool {
     /// Checks the rules that relate a message field to the enum it names.
     ///
     /// The walk runs once every enum in the set is linked, because a field's
-    /// enum may be declared later in its file or in a later file of the set.
+    /// enum may be declared later in its file or in a later file of the set,
+    /// and once the new files are in `self.files`, because the proto3 rule
+    /// reads the syntax of the file that declares the message.
     /// It visits the new messages in link order and each message's fields in
     /// declaration order, and returns the first violation.
     fn check_linked_enum_fields(&self, first_new_message: usize) -> Result<(), PoolError> {
-        for message in &self.messages[first_new_message..] {
+        let messages = &self.messages[first_new_message..];
+        let files = &self.message_file[first_new_message..];
+        for (message, &file) in messages.iter().zip(files) {
+            let proto3 = is_proto3(&self.files[file]);
             for field in &message.fields {
                 self.check_map_enum_first_value(message, field)?;
-                Self::check_implicit_presence_enum(message, field)?;
+                if proto3 {
+                    let full_name = || format!("{}.{}", message.full_name, field.name);
+                    self.check_proto3_closed_enum(field, full_name)?;
+                } else {
+                    Self::check_implicit_presence_enum(message, field)?;
+                }
             }
         }
         Ok(())
@@ -2992,9 +3062,11 @@ impl DescriptorPool {
 
     /// A singular enum field with implicit presence must name an open enum.
     /// A map entry's `value` field is such a field when its presence is
-    /// implicit, so the rule covers map values too. Repeated fields, oneof
-    /// members and proto3 `optional` fields do not have implicit presence
-    /// and pass, in proto3 files as well.
+    /// implicit, so the rule covers map values too. Repeated fields and
+    /// oneof members do not have implicit presence and pass. The walk applies
+    /// this rule to proto2 and editions files; a proto3 file is held to
+    /// `check_proto3_closed_enum`, which rejects every field this rule
+    /// would.
     fn check_implicit_presence_enum(
         message: &MessageDescriptor,
         field: &FieldDescriptor,
@@ -3005,6 +3077,35 @@ impl DescriptorPool {
         {
             return Err(PoolError::ImplicitPresenceClosedEnum {
                 field: format!("{}.{}", message.full_name, field.name),
+            });
+        }
+        Ok(())
+    }
+
+    /// A field of a proto3 message, or an extension declared in a proto3
+    /// file, must name an open enum. `full_name` gives the name to report.
+    ///
+    /// A map field passes: the walk also visits its entry message, whose
+    /// `value` field names the enum. `link_extension` calls this before
+    /// `finalize_field_enum_types` has run, when `field.enum_type` holds
+    /// only a field-level override, so an unset value falls back to the
+    /// enum's own type.
+    fn check_proto3_closed_enum(
+        &self,
+        field: &FieldDescriptor,
+        full_name: impl FnOnce() -> String,
+    ) -> Result<(), PoolError> {
+        let (FieldKind::Singular(SingularKind::Enum(eidx))
+        | FieldKind::List(SingularKind::Enum(eidx))) = field.kind
+        else {
+            return Ok(());
+        };
+        let enumeration = &self.enums[eidx.0 as usize];
+        let enum_type = field.enum_type.unwrap_or_else(|| enumeration.enum_type());
+        if enum_type == EnumType::Closed {
+            return Err(PoolError::Proto3ClosedEnumField {
+                field: full_name(),
+                enum_name: enumeration.full_name.clone(),
             });
         }
         Ok(())
