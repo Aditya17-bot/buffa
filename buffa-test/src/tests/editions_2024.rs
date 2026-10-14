@@ -1,7 +1,7 @@
 //! Edition 2024 feature resolution: field_presence, repeated_field_encoding,
 //! enum_type (open/closed), LEGACY_REQUIRED.
 //!
-//! Gated on has_edition_2024 (requires protoc v30+).
+//! Gated on has_edition_2024 (requires protoc v32+).
 
 use crate::ed2024::*;
 use buffa::Message;

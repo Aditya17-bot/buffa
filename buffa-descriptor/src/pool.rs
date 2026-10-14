@@ -308,7 +308,9 @@ pub enum PoolError {
     WrongTypeKind { type_name: String, field: String },
     /// Two declarations share the same fully-qualified symbol name.
     DuplicateName(String),
-    /// A fully-qualified name exceeds [`MAX_SYMBOL_LEN`].
+    /// The fully-qualified name of a message, enum, enum value, service,
+    /// method or extension exceeds [`MAX_SYMBOL_LEN`]. Field and oneof names
+    /// are not checked.
     NameTooLong { len: usize, limit: usize },
     /// A message has more than 65 535 fields, exceeding the `u16` index
     /// limit of the internal field-number lookup table behind
@@ -819,7 +821,11 @@ impl core::fmt::Display for PoolError {
                 )
             }
             Self::MessageSetWithFields { message } => {
-                write!(f, "MessageSet {message} declares fields instead of extensions")
+                write!(
+                    f,
+                    "MessageSet {message} declares a field; a MessageSet can have \
+                     extensions only"
+                )
             }
             Self::DuplicateMethodName { service, name } => {
                 write!(

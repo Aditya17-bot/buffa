@@ -6895,7 +6895,9 @@ fn messageset_declared_fields_are_rejected_transactionally() {
             assert!(matches!(err, PoolError::MessageSetWithFields { message } if message == name));
             assert_eq!(
                 err.to_string(),
-                format!("MessageSet {name} declares fields instead of extensions")
+                format!(
+                    "MessageSet {name} declares a field; a MessageSet can have extensions only"
+                )
             );
         });
     }

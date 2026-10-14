@@ -330,7 +330,7 @@ fn fields_and_oneofs_without_a_package_use_the_message_scope() {
 }
 
 #[test]
-fn field_and_oneof_names_do_not_gain_a_length_limit() {
+fn field_and_oneof_names_longer_than_max_symbol_len_link() {
     for (syntax, edition) in syntaxes() {
         for nested in [false, true] {
             for oneof in [false, true] {

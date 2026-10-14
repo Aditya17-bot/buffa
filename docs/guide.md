@@ -70,7 +70,7 @@ Or set the `PROTOC` environment variable to point to a specific binary.
 |---|---|
 | Proto2 + proto3 | v21.12 |
 | Editions 2023 | v27.0 |
-| Editions 2024 | v33.0 |
+| Editions 2024 | v32.0 |
 
 Note that the protoc version shipped by Debian and Ubuntu (`apt install protobuf-compiler`) is v21.12, which does not support editions. If you need editions, install a newer protoc from [GitHub releases](https://github.com/protocolbuffers/protobuf/releases) or use buf instead.
 
@@ -2015,7 +2015,7 @@ let duration = Duration::from(CoreDuration::new(3, 500_000_000));
 let time: CoreDuration = duration.try_into()?;
 ```
 
-The conversions out of `Timestamp` and `Duration` also accept a reference, so a message you still need is not consumed. This includes the conversions `buffa-types` provides behind its `chrono` and `jiff` features. A message-typed field is a `MessageField`; `as_option()` borrows its value:
+The conversions out of `Timestamp` and `Duration` also accept a reference, so a message you still need is not consumed. This includes the conversions `buffa-types` provides behind its `chrono` and `jiff` features. The numeric and `bool` wrappers (`Int32Value`, `Int64Value`, `UInt32Value`, `UInt64Value`, `FloatValue`, `DoubleValue`, `BoolValue`) convert to their primitive from a reference in the same way, as in `i32::from(&wrapper)`. `StringValue` and `BytesValue` convert by value only, since a conversion from a reference would clone. A message-typed field is a `MessageField`; `as_option()` borrows its value:
 
 ```rust,ignore
 let created: Option<std::time::SystemTime> = event

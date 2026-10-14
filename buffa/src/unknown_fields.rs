@@ -122,12 +122,17 @@ impl IntoIterator for UnknownFields {
 }
 
 impl Extend<UnknownField> for UnknownFields {
+    /// Appends each field, in iteration order. A field whose number is already
+    /// present is kept as a further record, as [`push`](UnknownFields::push)
+    /// does.
     fn extend<T: IntoIterator<Item = UnknownField>>(&mut self, iter: T) {
         self.fields.extend(iter);
     }
 }
 
 impl FromIterator<UnknownField> for UnknownFields {
+    /// Collects unknown fields into an [`UnknownFields`], keeping their order
+    /// and any repeated field numbers.
     fn from_iter<T: IntoIterator<Item = UnknownField>>(iter: T) -> Self {
         Self {
             fields: iter.into_iter().collect(),

@@ -146,7 +146,7 @@ pub fn merge_from_str<M: TextFormat>(msg: &mut M, s: &str) -> Result<(), ParseEr
 }
 
 /// Decode a message from a textproto string under a caller-supplied
-/// element-memory budget.
+/// element-memory budget, in bytes.
 ///
 /// [`decode_from_str`] applies
 /// [`DEFAULT_ELEMENT_MEMORY_LIMIT`](crate::DEFAULT_ELEMENT_MEMORY_LIMIT),

@@ -383,7 +383,7 @@ buffa passes the protobuf binary and JSON conformance test suite (v33.5, edition
 |---|---|
 | Proto2 + proto3 | v21.12 |
 | Editions 2023 | v27.0 |
-| Editions 2024 | v33.0 |
+| Editions 2024 | v32.0 |
 
 Note that Linux distro packages (Debian Bookworm, Ubuntu 24.04) ship protoc v21.12, which does not support editions. Install protoc v27+ from [GitHub releases](https://github.com/protocolbuffers/protobuf/releases) or use buf if you need editions support.
 

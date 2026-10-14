@@ -8,7 +8,7 @@ separate `buffa` runtime crate.
 
 By default, `buffa-build` runs `protoc`. Install it on `PATH` or set the
 `PROTOC` environment variable. The minimum version is v21.12; schemas that use
-editions 2023 need v27.0, and schemas that use editions 2024 need v33.0.
+editions 2023 need v27.0, and schemas that use editions 2024 need v32.0.
 
 To use `buf` instead, install it and select it with `.use_buf()`. That mode
 needs a `buf.yaml` at the crate root, ignores `.includes()`, and takes
