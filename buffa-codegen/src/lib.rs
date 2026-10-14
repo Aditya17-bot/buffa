@@ -1512,6 +1512,13 @@ pub struct CodeGenConfig {
     /// all types, `".my.pkg"` to types in that package, `".my.pkg.MyMessage"`
     /// to a specific type. The `attribute` is a raw Rust attribute string
     /// (e.g., `"#[derive(serde::Serialize)]"`).
+    ///
+    /// When using a custom `serde::Serialize` derive, follow the requirements
+    /// documented by `buffa_build::Config::type_attribute`: disable
+    /// unknown-field preservation for generated messages and enable the
+    /// `json` feature for buffa's `EnumValue` and `MessageField` serde
+    /// implementations. Do not combine a custom derive with generated JSON
+    /// implementations.
     pub type_attributes: Vec<(String, String)>,
     /// Custom attributes to inject on generated struct fields.
     ///
@@ -1541,9 +1548,11 @@ pub struct CodeGenConfig {
     /// Same path-matching semantics as `type_attributes`, matched against the
     /// oneof's fully-qualified path (`.pkg.Message.oneof_name`). Useful when a
     /// oneof needs a different attribute set than the surrounding types — e.g.
-    /// keeping `#[derive(serde::Serialize)]` on messages and oneofs while a
-    /// separate `enum_attributes` entry puts a different serde derive on the
-    /// regular enums.
+    /// applying `#[derive(serde::Serialize)]` to oneofs while a separate
+    /// `enum_attributes` entry puts a different serde derive on the regular
+    /// enums. When the surrounding messages use the same custom derive, follow
+    /// the `buffa_build::Config::type_attribute` requirements for unknown
+    /// fields and the `json` feature.
     pub oneof_attributes: Vec<(String, String)>,
     /// Custom attributes to inject on a message struct's field holding a
     /// oneof (the `Option<OneofEnum>` member), not on the oneof's variants or

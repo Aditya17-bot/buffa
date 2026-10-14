@@ -1787,10 +1787,21 @@ impl Config {
     /// `type_attribute(".", "#[derive(Clone)]")` produces a compile error in
     /// the generated code.
     ///
+    /// A custom `serde::Serialize` derive has two additional requirements:
+    /// messages must disable unknown-field preservation because
+    /// `UnknownFields` does not implement `serde::Serialize`, and the `json`
+    /// feature must be enabled for buffa's `EnumValue` and `MessageField`
+    /// serde implementations. Do not combine a custom derive with
+    /// [`generate_json(true)`](Self::generate_json), which already generates
+    /// the message's serde implementations.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
     /// buffa_build::Config::new()
+    ///     // `UnknownFields` does not implement `serde::Serialize`; with this
+    ///     // off, unknown fields are dropped on decode.
+    ///     .preserve_unknown_fields(false)
     ///     .type_attribute(".", "#[derive(serde::Serialize)]")
     ///     .type_attribute(".my.pkg.MyEnum", "#[derive(strum::EnumIter)]")
     ///     .files(&["proto/my_service.proto"])
@@ -1960,6 +1971,12 @@ impl Config {
     /// `Debug` derive with a manual impl). Re-deriving any of these via
     /// `oneof_attribute` produces a conflicting-implementation compile error
     /// inside the generated code.
+    ///
+    /// For the `serde::Serialize` requirements when the surrounding messages
+    /// also use a custom derive, see the [`type_attribute`](Self::type_attribute)
+    /// pitfalls: disable unknown-field preservation for messages and enable
+    /// the `json` feature for buffa's serde implementations. Do not combine
+    /// custom derives with [`generate_json(true)`](Self::generate_json).
     ///
     /// # Example
     ///
