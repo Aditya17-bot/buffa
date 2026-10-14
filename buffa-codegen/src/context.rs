@@ -291,6 +291,69 @@ fn keyword_rename_note(kind: &str, resolved: &str) -> String {
     )
 }
 
+/// Parses a custom attribute string as one or more outer attributes.
+///
+/// The whole string must be `#[...]` attributes (`syn::Attribute::parse_outer`);
+/// a `///` doc comment is one. A string with any other token is an error: a
+/// bare `serde(skip)`, an inner attribute `#![...]`, or an attribute followed
+/// by an item or a field. So is a string with no attribute in it.
+fn parse_outer_attribute_string(attr_str: &str) -> syn::Result<proc_macro2::TokenStream> {
+    use syn::parse::Parser as _;
+
+    let parser = |input: syn::parse::ParseStream<'_>| {
+        // `//!` lexes as `#![doc = "..."]`, so this covers it too.
+        if input.peek(syn::Token![#]) && input.peek2(syn::Token![!]) {
+            return Err(input.error("an inner attribute `#![...]` is not accepted; write `#[...]`"));
+        }
+        let attrs = input.call(syn::Attribute::parse_outer)?;
+        if !input.is_empty() {
+            return Err(input.error("expected an outer attribute of the form `#[...]`"));
+        }
+        if attrs.is_empty() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "expected at least one `#[...]` attribute",
+            ));
+        }
+        Ok(quote::quote!(#(#attrs)*))
+    };
+    parser.parse_str(attr_str)
+}
+
+/// Parses the custom attribute string of the rule `(path, attr_str)`,
+/// reporting a string that is not one or more outer attributes as
+/// `CodeGenError::InvalidCustomAttribute`.
+fn parse_custom_attribute(
+    path: &str,
+    attr_str: &str,
+) -> Result<proc_macro2::TokenStream, crate::CodeGenError> {
+    parse_outer_attribute_string(attr_str).map_err(|err| {
+        crate::CodeGenError::InvalidCustomAttribute {
+            path: path.to_string(),
+            attribute: attr_str.to_string(),
+            detail: err.to_string(),
+        }
+    })
+}
+
+/// Checks every custom attribute rule of `config`, in the order of its six
+/// attribute lists, whether or not the rule's path matches a generated item.
+pub(crate) fn validate_custom_attributes(
+    config: &crate::CodeGenConfig,
+) -> Result<(), crate::CodeGenError> {
+    [
+        &config.type_attributes,
+        &config.field_attributes,
+        &config.message_attributes,
+        &config.enum_attributes,
+        &config.oneof_attributes,
+        &config.oneof_struct_field_attributes,
+    ]
+    .into_iter()
+    .flatten()
+    .try_for_each(|(path, attr_str)| parse_custom_attribute(path, attr_str).map(drop))
+}
+
 impl<'a> CodeGenContext<'a> {
     /// Build a context from file descriptors, populating the type map.
     ///
@@ -1197,15 +1260,16 @@ impl<'a> CodeGenContext<'a> {
     /// Collect custom attributes matching a fully-qualified proto path.
     ///
     /// Returns a `TokenStream` of all `#[...]` attributes whose path prefix
-    /// matches `fqn`. Each attribute string is parsed via `syn::parse_str`
-    /// so the caller can interpolate directly into `quote!`.
+    /// matches `fqn`. Each attribute string must parse as one or more outer
+    /// attributes (`syn::Attribute::parse_outer`) with no tokens left over,
+    /// so the caller can interpolate the result directly into `quote!`.
     ///
     /// `fqn` uses dotted form without a leading dot (e.g., `"my.pkg.MyMessage"`).
     ///
     /// # Errors
     ///
     /// Returns `CodeGenError::InvalidCustomAttribute` if any matching attribute
-    /// string fails to parse as a valid Rust attribute.
+    /// string does not parse as one or more `#[...]` attributes.
     pub(crate) fn matching_attributes(
         attrs: &[(String, String)],
         fqn: &str,
@@ -1217,15 +1281,7 @@ impl<'a> CodeGenContext<'a> {
         let mut tokens = proc_macro2::TokenStream::new();
         for (prefix, attr_str) in attrs {
             if matches_proto_prefix(prefix, &fqn_dotted) {
-                let parsed =
-                    syn::parse_str::<proc_macro2::TokenStream>(attr_str).map_err(|err| {
-                        crate::CodeGenError::InvalidCustomAttribute {
-                            path: prefix.clone(),
-                            attribute: attr_str.clone(),
-                            detail: err.to_string(),
-                        }
-                    })?;
-                tokens.extend(parsed);
+                tokens.extend(parse_custom_attribute(prefix, attr_str)?);
             }
         }
         Ok(tokens)
@@ -3663,6 +3719,84 @@ mod tests {
             err,
             crate::CodeGenError::InvalidCustomAttribute { .. }
         ));
+    }
+
+    /// The `detail` of the error `matching_attributes` gives for `attribute`.
+    fn attribute_error_detail(attribute: &str) -> String {
+        let attrs = vec![(".my.pkg".to_string(), attribute.to_string())];
+        match CodeGenContext::matching_attributes(&attrs, "my.pkg.Msg") {
+            Err(crate::CodeGenError::InvalidCustomAttribute {
+                path,
+                attribute: reported,
+                detail,
+            }) => {
+                assert_eq!(path, ".my.pkg");
+                assert_eq!(reported, attribute);
+                detail
+            }
+            other => panic!("{attribute:?}: expected InvalidCustomAttribute, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_matching_attributes_rejects_tokens_that_are_not_outer_attributes() {
+        // Each of these lexes as a token stream, so it used to be spliced
+        // into the generated code as written.
+        for attribute in [
+            "serde(skip)",
+            "pub extra: u32,",
+            "#[derive(A)] pub extra: u32,",
+            "#[derive(A)] serde(skip)",
+            "derive(A) #[derive(B)]",
+        ] {
+            assert_eq!(
+                attribute_error_detail(attribute),
+                "expected an outer attribute of the form `#[...]`",
+                "{attribute:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_matching_attributes_rejects_an_inner_attribute() {
+        for attribute in ["#![allow(dead_code)]", "//! Module docs."] {
+            assert_eq!(
+                attribute_error_detail(attribute),
+                "an inner attribute `#![...]` is not accepted; write `#[...]`",
+                "{attribute:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_matching_attributes_rejects_a_string_without_an_attribute() {
+        for attribute in ["", "  \n"] {
+            assert_eq!(
+                attribute_error_detail(attribute),
+                "expected at least one `#[...]` attribute",
+                "{attribute:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_matching_attributes_multiple_in_one_string() {
+        // Several `#[...]` attributes in a single string stay valid, and a
+        // doc comment is an outer attribute.
+        let attrs = vec![(
+            ".".into(),
+            "/// Doc.\n#[derive(A)] #[serde(rename = \"b\")] \
+             #[cfg_attr(feature = \"json\", serde(default))]"
+                .into(),
+        )];
+        let result = CodeGenContext::matching_attributes(&attrs, "my.pkg.Msg").unwrap();
+        let parsed: syn::ItemStruct = syn::parse2(quote::quote!(#result struct S;)).unwrap();
+        let paths: Vec<String> = parsed
+            .attrs
+            .iter()
+            .map(|attr| attr.path().get_ident().unwrap().to_string())
+            .collect();
+        assert_eq!(paths, ["doc", "derive", "serde", "cfg_attr"]);
     }
 
     #[test]

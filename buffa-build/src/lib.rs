@@ -1767,10 +1767,12 @@ impl Config {
     /// trailing `.` is trimmed. Prefix matching respects proto-segment
     /// boundaries, so `".my.pk"` does not match `".my.pkg.Msg"`.
     ///
-    /// `attribute` is a raw Rust attribute string
-    /// (e.g., `"#[derive(serde::Serialize)]"`). A malformed attribute
-    /// produces [`CodeGenError::InvalidCustomAttribute`](buffa_codegen::CodeGenError)
-    /// at compile time rather than being silently dropped.
+    /// `attribute` is one or more outer Rust attributes, each written with
+    /// its `#[...]` (e.g., `"#[derive(serde::Serialize)]"`). Any other
+    /// string, such as `"serde(skip)"` or an empty one, makes
+    /// [`compile`](Self::compile) fail with
+    /// [`CodeGenError::InvalidCustomAttribute`](buffa_codegen::CodeGenError),
+    /// whether or not `path` matches a generated type.
     ///
     /// Multiple calls accumulate in insertion order — all matching attributes
     /// are emitted, and ordering is preserved in generated code.
@@ -1831,6 +1833,11 @@ impl Config {
     /// [`oneof_struct_field_attribute`](Self::oneof_struct_field_attribute) for
     /// that.
     ///
+    /// `attribute` follows the rule given for
+    /// [`type_attribute`](Self::type_attribute): any string that is not one
+    /// or more `#[...]` attributes, an empty one included, makes
+    /// [`compile`](Self::compile) fail.
+    ///
     /// A `#[deprecated]` supplied here wins over the one codegen derives from
     /// the field's `[deprecated = true]` option — rustc permits only one
     /// `deprecated` attribute per item — so this is also how to attach a note
@@ -1881,9 +1888,13 @@ impl Config {
     ///
     /// Same path-matching semantics as [`type_attribute`](Self::type_attribute) —
     /// leading `.` auto-prepended, trailing `.` trimmed, proto-segment-aware
-    /// prefix matching, accumulation in insertion order. A malformed attribute
-    /// produces a compile-time error. Useful for struct-only attributes like
-    /// `#[serde(default)]`.
+    /// prefix matching, accumulation in insertion order. Useful for
+    /// struct-only attributes like `#[serde(default)]`.
+    ///
+    /// `attribute` follows the rule given for
+    /// [`type_attribute`](Self::type_attribute): any string that is not one
+    /// or more `#[...]` attributes, an empty one included, makes
+    /// [`compile`](Self::compile) fail.
     ///
     /// # Example
     ///
@@ -1915,11 +1926,15 @@ impl Config {
     ///
     /// Same path-matching semantics as [`type_attribute`](Self::type_attribute) —
     /// leading `.` auto-prepended, trailing `.` trimmed, proto-segment-aware
-    /// prefix matching, accumulation in insertion order. A malformed attribute
-    /// produces a compile-time error. Useful when you want to inject an
-    /// attribute on every enum in a package without also matching the
-    /// (often more numerous) messages that share the path prefix — e.g.
+    /// prefix matching, accumulation in insertion order. Useful when you want
+    /// to inject an attribute on every enum in a package without also matching
+    /// the (often more numerous) messages that share the path prefix — e.g.
     /// `#[derive(strum::EnumIter)]`, which only makes sense on enums.
+    ///
+    /// `attribute` follows the rule given for
+    /// [`type_attribute`](Self::type_attribute): any string that is not one
+    /// or more `#[...]` attributes, an empty one included, makes
+    /// [`compile`](Self::compile) fail.
     ///
     /// # Example
     ///
@@ -1950,9 +1965,13 @@ impl Config {
     /// segment; to target a single variant's field, append `.variant_name`
     /// and use [`field_attribute`](Self::field_attribute) instead, and for the
     /// message struct's field holding the oneof, use
-    /// [`oneof_struct_field_attribute`](Self::oneof_struct_field_attribute). A
-    /// malformed attribute produces a compile-time error in the generated
-    /// code. Useful when a oneof needs a different attribute set than the
+    /// [`oneof_struct_field_attribute`](Self::oneof_struct_field_attribute).
+    /// `attribute` follows the rule given for
+    /// [`type_attribute`](Self::type_attribute): any string that is not one
+    /// or more `#[...]` attributes, an empty one included, makes
+    /// [`compile`](Self::compile) fail.
+    ///
+    /// Useful when a oneof needs a different attribute set than the
     /// surrounding types — for example to keep `#[derive(serde::Serialize)]`
     /// on messages and oneofs while
     /// [`enum_attribute`](Self::enum_attribute) gives the regular enums a
@@ -2009,7 +2028,12 @@ impl Config {
     /// as [`type_attribute`](Self::type_attribute): `".my.pkg"` reaches the
     /// oneof field of every message in the package, nested ones included.
     /// Attributes accumulate in insertion order, after buffa's own attributes
-    /// on the field. A malformed attribute produces a compile-time error.
+    /// on the field.
+    ///
+    /// `attribute` follows the rule given for
+    /// [`type_attribute`](Self::type_attribute): any string that is not one
+    /// or more `#[...]` attributes, an empty one included, makes
+    /// [`compile`](Self::compile) fail.
     ///
     /// A rule on a variant's path (`.my.pkg.MyMessage.my_oneof.variant_name`)
     /// does not match the oneof, so it has no effect, and the build does not
@@ -2285,6 +2309,9 @@ impl Config {
     /// - the descriptor set bytes cannot be decoded as a `FileDescriptorSet`
     /// - an [`extern_path`](Self::extern_path) proto name has an empty
     ///   segment or a segment that is not a protobuf identifier
+    /// - a custom attribute string, given to
+    ///   [`type_attribute`](Self::type_attribute) or one of the five methods
+    ///   beside it, is not one or more `#[...]` attributes
     /// - code generation fails (e.g. unsupported proto feature), including a
     ///   [`codec_strategy_in`](Self::codec_strategy_in) rule that names by its
     ///   exact path a message that cannot use the table codec

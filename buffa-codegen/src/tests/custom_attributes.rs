@@ -681,6 +681,80 @@ fn test_oneof_struct_field_attribute_invalid_attribute_errors() {
 }
 
 #[test]
+fn test_oneof_struct_field_attribute_rejects_tokens_that_are_not_an_attribute() {
+    // A struct field is valid in this position, so it used to be generated
+    // as a second field of `Msg`.
+    let file = two_oneof_messages_file();
+    let config = oneof_field_config(&[(".pkg.Msg.payload", "pub extra: u32,")]);
+    let err = generate(&[file], &["oneofs.proto".to_string()], &config)
+        .expect_err("a field declaration is not an attribute");
+    assert!(
+        matches!(
+            &err,
+            CodeGenError::InvalidCustomAttribute { path, attribute, .. }
+                if path == ".pkg.Msg.payload" && attribute == "pub extra: u32,"
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn test_attribute_string_is_checked_when_its_path_matches_nothing() {
+    // The rule is about the string, so a build does not start failing only
+    // once a `.proto` gains an item the path matches.
+    let file = two_oneof_messages_file();
+    let rule = vec![(".pkg.NoSuchType".to_string(), String::new())];
+    let configs = [
+        CodeGenConfig {
+            type_attributes: rule.clone(),
+            ..CodeGenConfig::default()
+        },
+        CodeGenConfig {
+            field_attributes: rule.clone(),
+            ..CodeGenConfig::default()
+        },
+        CodeGenConfig {
+            message_attributes: rule.clone(),
+            ..CodeGenConfig::default()
+        },
+        CodeGenConfig {
+            enum_attributes: rule.clone(),
+            ..CodeGenConfig::default()
+        },
+        CodeGenConfig {
+            oneof_attributes: rule.clone(),
+            ..CodeGenConfig::default()
+        },
+        CodeGenConfig {
+            oneof_struct_field_attributes: rule,
+            ..CodeGenConfig::default()
+        },
+    ];
+    for (i, config) in configs.iter().enumerate() {
+        let err = generate(
+            std::slice::from_ref(&file),
+            &["oneofs.proto".to_string()],
+            config,
+        )
+        .expect_err("an empty string is not an attribute");
+        assert!(
+            matches!(
+                &err,
+                CodeGenError::InvalidCustomAttribute { path, attribute, .. }
+                    if path == ".pkg.NoSuchType" && attribute.is_empty()
+            ),
+            "list {i}: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "invalid custom attribute for path '.pkg.NoSuchType': '' must be one or more \
+             outer `#[...]` attributes (expected at least one `#[...]` attribute)",
+            "list {i}"
+        );
+    }
+}
+
+#[test]
 fn test_oneof_attribute_specific_path_matches_one_oneof() {
     let mut file = proto3_file("two.proto");
     file.package = Some("pkg".to_string());
