@@ -1,0 +1,35 @@
+edition = "2023";
+
+package repeated_enum_json;
+
+// Compiled with `repeated_type_custom("crate::repeated_type::CustomList<*>")`
+// and `generate_json(true)`, so every repeated enum field is `CustomList<_>`
+// and deserializes through the `repeated_enum` / `repeated_closed_enum` serde
+// modules.
+
+enum OpenColor {
+  OPEN_UNSPECIFIED = 0;
+  OPEN_RED = 1;
+}
+
+enum ClosedColor {
+  option features.enum_type = CLOSED;
+  CLOSED_UNSPECIFIED = 0;
+  CLOSED_RED = 1;
+}
+
+message Palette {
+  repeated OpenColor open = 1;
+  repeated ClosedColor closed = 2;
+}
+
+// A oneof gives the message a hand-generated `Deserialize`, which calls the
+// same two modules through a `DeserializeSeed`. `Palette` has the derived one.
+message Swatch {
+  repeated OpenColor open = 1;
+  repeated ClosedColor closed = 2;
+  oneof label {
+    string name = 3;
+    int32 index = 4;
+  }
+}
